@@ -1,8 +1,8 @@
 /*!
- * ScrollSmoother 3.11.3
+ * ScrollSmoother 3.11.5
  * https://greensock.com
  *
- * @license Copyright 2008-2022, GreenSock. All rights reserved.
+ * @license Copyright 2008-2023, GreenSock. All rights reserved.
  * Subject to the terms at https://greensock.com/standard-license or for
  * Club GreenSock members, the agreement issued with that membership.
  * @author: Jack Doyle, jack@greensock.com
@@ -54,13 +54,13 @@ export class ScrollSmoother {
 		_mainInstance = this;
 		_context(this);
 
-		let {smoothTouch, onUpdate, onStop, smooth, onFocusIn, normalizeScroll} = vars,
+		let {smoothTouch, onUpdate, onStop, smooth, onFocusIn, normalizeScroll, wholePixels} = vars,
 			content, wrapper, height, mainST, effects, sections, intervalID, wrapperCSS, contentCSS, paused, pausedNormalizer, recordedRefreshScroll, recordedRefreshScrub,
 			self = this,
-			resizeObserver = typeof(ResizeObserver) !== "undefined" && vars.autoResize !== false && new ResizeObserver(() => ScrollTrigger.isRefreshing || _onResizeDelayedCall.restart(true)),
 			effectsPrefix = vars.effectsPrefix || "",
 			scrollFunc = ScrollTrigger.getScrollFunc(_win),
 			smoothDuration = ScrollTrigger.isTouch === 1 ? (smoothTouch === true ? 0.8 : parseFloat(smoothTouch) || 0) : (smooth === 0 || smooth === false) ? 0 : parseFloat(smooth) || 0.8,
+			speed = (smoothDuration && +vars.speed) || 1,
 			currentY = 0,
 			delta = 0,
 			startupPhase = 1,
@@ -82,6 +82,7 @@ export class ScrollSmoother {
 			},
 			render = (y, force) => {
 				if ((y !== currentY && !paused) || force) {
+					wholePixels && (y = Math.round(y));
 					if (smoothDuration) {
 						content.style.transform = "matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, " + y + ", 0, 1)";
 						//content.style.transform = "translateY(" + y + "px)"; // NOTE: when we used matrix3d() or set will-change: transform, it performed noticeably worse on iOS counter-intuitively!
@@ -89,7 +90,7 @@ export class ScrollSmoother {
 					}
 					delta = y - currentY;
 					currentY = y;
-					ScrollTrigger.isUpdating || ScrollTrigger.update();
+					ScrollTrigger.isUpdating || ScrollSmoother.isRefreshing || ScrollTrigger.update(); // note: if we allowed an update() when in the middle of a refresh() it could render all the other ScrollTriggers and inside the update(), _refreshing would be true thus scrubs would jump instantly, but then on the very next update they'd continue from there. Basically this allowed update() to be called on OTHER ScrollTriggers during the refresh() of the mainST which could cause some complications. See https://greensock.com/forums/topic/35536-smoothscroller-ignoremobileresize-for-non-touch-devices
 				}
 			},
 			scrollTop = function(value) {
@@ -98,11 +99,18 @@ export class ScrollSmoother {
 					scroll.y = -value; // don't use currentY because we must accurately track the delta variable (in render() method)
 					isProxyScrolling = true; // otherwise, if snapping was applied (or anything that attempted to SET the scroll proxy's scroll position), we'd set the scroll here which would then (on the next tick) update the content tween/ScrollTrigger which would try to smoothly animate to that new value, thus the scrub tween would impede the progress. So we use this flag to respond accordingly in the ScrollTrigger's onUpdate and effectively force the scrub to its end immediately.
 					paused ? (currentY = -value) : render(-value);
-					ScrollTrigger.isRefreshing ? mainST.update() : scrollFunc(value); // during a refresh, we revert all scrollers to 0 and then put them back. We shouldn't force the window to that value too during the refresh.
+					ScrollTrigger.isRefreshing ? mainST.update() : scrollFunc(value / speed); // during a refresh, we revert all scrollers to 0 and then put them back. We shouldn't force the window to that value too during the refresh.
 					return this;
 				}
 				return -currentY;
 			},
+			resizeObserver = typeof(ResizeObserver) !== "undefined" && vars.autoResize !== false && new ResizeObserver(() => {
+				if (!ScrollTrigger.isRefreshing) {
+					let max = ScrollTrigger.maxScroll(wrapper);
+					max < -currentY && scrollTop(max) // if the user scrolled down to the bottom, for example, and then the page resizes smaller, we should adjust things accordingly right away so that the scroll position isn't past the very end.
+					_onResizeDelayedCall.restart(true);
+				}
+			}),
 			lastFocusElement, // if the user clicks a button that scrolls the page, for example, then unfocuses the window and comes back and activates the window/tab again, it'll want to focus back on that same button element but in that case we should skip it. Only jump there when a new element gets focus, like tabbing for accessibility.
 			_onFocusIn = e => { // when the focus changes, make sure that element is on-screen
 				wrapper.scrollTop = 0;
@@ -168,7 +176,8 @@ export class ScrollSmoother {
 					return v === "auto" ? v : parseFloat(v);
 				};
 			},
-			createEffect = (el, speed, lag, index) => {
+			createEffect = (el, speed, lag, index, effectsPadding) => {
+				effectsPadding = (typeof(effectsPadding) === "function" ? effectsPadding(index, el) : effectsPadding) || 0;
 				let getSpeed = effectValueGetter("speed", speed, index, el),
 					getLag = effectValueGetter("lag", lag, index, el),
 					startY = gsap.getProperty(el, "y"),
@@ -213,6 +222,8 @@ export class ScrollSmoother {
 				if (ratio !== 1 || autoSpeed || scrub) {
 					st = ScrollTrigger.create({
 						trigger: autoSpeed ? el.parentNode : el,
+						start: "top bottom+=" + effectsPadding,
+						end: "bottom top-=" + effectsPadding,
 						scroller: wrapper,
 						scrub: true,
 						refreshPriority: -999, // must update AFTER any other ScrollTrigger pins
@@ -289,7 +300,7 @@ export class ScrollSmoother {
 				st = ScrollTrigger.create({trigger: target, start: position || "top top"}),
 				y;
 			effects && adjustParallaxPosition([st], true);
-			y = st.start;
+			y = st.start / speed;
 			st.kill(false);
 			target.style.cssText = cssText;
 			gsap.core.getCache(target).uncache = 1;
@@ -299,8 +310,8 @@ export class ScrollSmoother {
 		function refreshHeight() {
 			height = content.clientHeight;
 			content.style.overflow = "visible"
-			_body.style.height = height + "px";
-			return height - _win.innerHeight;
+			_body.style.height = (_win.innerHeight + (height - _win.innerHeight) / speed) + "px";
+			return (height - _win.innerHeight);
 		}
 
 		this.content = function(element) {
@@ -342,11 +353,11 @@ export class ScrollSmoother {
 				}
 			});
 			config = config || {};
-			let {speed, lag} = config,
+			let {speed, lag, effectsPadding} = config,
 				effectsToAdd = [],
 				i, st;
 			for (i = 0; i < targets.length; i++) {
-				st = createEffect(targets[i], speed, lag, i);
+				st = createEffect(targets[i], speed, lag, i, effectsPadding);
 				st && effectsToAdd.push(st);
 			}
 			effects.push(...effectsToAdd);
@@ -388,7 +399,7 @@ export class ScrollSmoother {
 		});
 		ScrollTrigger.defaults({scroller: wrapper});
 		let existingScrollTriggers = ScrollTrigger.getAll().filter(st => st.scroller === _win || st.scroller === wrapper);
-		existingScrollTriggers.forEach(st => st.revert(true)) // in case it's in an environment like React where child components that have ScrollTriggers instantiate BEFORE the parent that does ScrollSmoother.create(...);
+		existingScrollTriggers.forEach(st => st.revert(true, true)); // in case it's in an environment like React where child components that have ScrollTriggers instantiate BEFORE the parent that does ScrollSmoother.create(...);
 
 		mainST = ScrollTrigger.create({
 			animation: gsap.fromTo(scroll, {y: 0}, {
@@ -411,6 +422,7 @@ export class ScrollSmoother {
 				}
 			}),
 			onRefreshInit: self => {
+				ScrollSmoother.isRefreshing = true;
 				if (effects) {
 					let pins = ScrollTrigger.getAll().filter(st => !!st.pin);
 					effects.forEach(st => {
@@ -430,30 +442,31 @@ export class ScrollSmoother {
 				recordedRefreshScrub = scrub && scrub._end > scrub._dp._time; // don't use scrub.progress() < 1 because we may have called killScrub() recently in which case it'll report progress() as 1 when we were actually in the middle of a scrub. That's why we tap into the _end instead.
 				recordedRefreshScroll = currentY;
 				scroll.y = 0;
-				if (smoothDuration) { // Safari 16 has a major bug - if you set wrapper.scrollTop to 0 (even if it's already 0), it blocks the whole page from scrolling page non-scrollable! See https://bugs.webkit.org/show_bug.cgi?id=245300 and https://codepen.io/GreenSock/pen/YzLZVOz An alternate is to set position to absolute and then back to fixed after setting scrollTop, but that's less performant.
-					wrapper.style.pointerEvents = "none"; // Safari 16 has a major bug - if you set wrapper.scrollTop to 0 (even if it's already 0), it makes the entire page non-scrollable! The only workaround I know of is to change to position absolute and then back again. See https://bugs.webkit.org/show_bug.cgi?id=245300 and https://codepen.io/GreenSock/pen/YzLZVOz
+				if (smoothDuration) {
+					ScrollTrigger.isTouch === 1 && (wrapper.style.position = "absolute"); // Safari 16 has a major bug - if you set wrapper.scrollTop to 0 (even if it's already 0), it blocks the whole page from scrolling page non-scrollable! See https://bugs.webkit.org/show_bug.cgi?id=245300 and https://codepen.io/GreenSock/pen/YzLZVOz. Originally we set pointer-events: none on the wrapper temporarily, and set it back to all after setting scrollTop to 0, but that could cause mouseenter/mouseleave/etc. events to fire too, so we opted to set the position to absolute and then back to fixed after setting scrollTop.
 					wrapper.scrollTop = 0; // set wrapper.scrollTop to 0 because in some very rare situations, the browser will auto-set that, like if there's a hash in the link or changing focus to an off-screen input
-					setTimeout(() => wrapper.style.removeProperty("pointer-events"), 50);
+					ScrollTrigger.isTouch === 1 && (wrapper.style.position = "fixed");
 				}
 			},
 			onRefresh: self => {
 				self.animation.invalidate(); // because pinnedContainers may have been found in ScrollTrigger's _refreshAll() that extend the height. Without this, it may prevent the user from being able to scroll all the way down.
-				self.setPositions(self.start, refreshHeight());
+				self.setPositions(self.start, refreshHeight() / speed);
 				recordedRefreshScrub || killScrub(self);
-				scroll.y = -scrollFunc(); // in 3.11.1, we shifted to forcing the scroll position to 0 during the entire refreshAll() in ScrollTrigger and then restored the scroll position AFTER everything had been updated, thus we should always make these adjustments AFTER a full refresh rather than putting it in the onRefresh() of the individual mainST ScrollTrigger which would fire before the scroll position was restored.
+				scroll.y = -scrollFunc() * speed; // in 3.11.1, we shifted to forcing the scroll position to 0 during the entire refreshAll() in ScrollTrigger and then restored the scroll position AFTER everything had been updated, thus we should always make these adjustments AFTER a full refresh rather than putting it in the onRefresh() of the individual mainST ScrollTrigger which would fire before the scroll position was restored.
 				render(scroll.y);
-				startupPhase || self.animation.progress(gsap.utils.clamp(0, 1, recordedRefreshScroll / -self.end));
+				startupPhase || self.animation.progress(gsap.utils.clamp(0, 1, recordedRefreshScroll / speed / -self.end));
 				if (recordedRefreshScrub) { // we need to trigger the scrub to happen again
 					self.progress -= 0.001;
 					self.update();
 				}
+				ScrollSmoother.isRefreshing = false;
 			},
 			id: "ScrollSmoother",
 			scroller: _win,
 			invalidateOnRefresh: true,
 			start: 0,
 			refreshPriority: -9999, // because all other pins, etc. should be calculated first before this figures out the height of the body. BUT this should also update FIRST so that the scroll position on the proxy is up-to-date when all the ScrollTriggers calculate their progress! -9999 is a special number that ScrollTrigger looks for to handle in this way.
-			end: refreshHeight,
+			end: () => refreshHeight() / speed,
 			onScrubComplete: () => {
 				tracker.reset();
 				onStop && onStop(this);
@@ -462,19 +475,24 @@ export class ScrollSmoother {
 		});
 
 		this.smooth = function(value) {
-			arguments.length && (smoothDuration = value || 0);
-			return arguments.length ? mainST.scrubDuration(value) : mainST.getTween() ? mainST.getTween().duration() : 0;
+			if (arguments.length) {
+				smoothDuration = value || 0;
+				speed = (smoothDuration && +vars.speed) || 1;
+				mainST.scrubDuration(value);
+			}
+			return mainST.getTween() ? mainST.getTween().duration() : 0;
 		};
 
 		mainST.getTween() && (mainST.getTween().vars.ease = vars.ease || _expo);
 
 		this.scrollTrigger = mainST;
 
-		vars.effects && this.effects(vars.effects === true ? "[data-" + effectsPrefix + "speed], [data-" + effectsPrefix + "lag]" : vars.effects, {});
+		vars.effects && this.effects(vars.effects === true ? "[data-" + effectsPrefix + "speed], [data-" + effectsPrefix + "lag]" : vars.effects, {effectsPadding: vars.effectsPadding});
 		vars.sections && this.sections(vars.sections === true ? "[data-section]" : vars.sections);
 
 		existingScrollTriggers.forEach(st => {
 			st.vars.scroller = wrapper;
+			st.revert(false, true);
 			st.init(st.vars, st.animation);
 		});
 
@@ -483,7 +501,7 @@ export class ScrollSmoother {
 				if (!!paused !== value) {
 					if (value) { // pause
 						mainST.getTween() && mainST.getTween().pause();
-						scrollFunc(-currentY);
+						scrollFunc(-currentY / speed);
 						tracker.reset();
 						pausedNormalizer = ScrollTrigger.normalizeScroll();
 						pausedNormalizer && pausedNormalizer.disable(); // otherwise the normalizer would try to scroll the page on things like wheel events.
@@ -500,7 +518,7 @@ export class ScrollSmoother {
 						paused.kill();
 						paused = 0;
 						pausedNormalizer && pausedNormalizer.enable();
-						mainST.progress = (-currentY - mainST.start) / (mainST.end - mainST.start);
+						mainST.progress = (-currentY / speed - mainST.start) / (mainST.end - mainST.start);
 						killScrub(mainST);
 					}
 				}
@@ -590,7 +608,7 @@ export class ScrollSmoother {
 
 }
 
-ScrollSmoother.version = "3.11.3";
+ScrollSmoother.version = "3.11.5";
 ScrollSmoother.create = vars => (_mainInstance && vars && _mainInstance.content() === _toArray(vars.content)[0]) ? _mainInstance : new ScrollSmoother(vars);
 ScrollSmoother.get = () => _mainInstance;
 
